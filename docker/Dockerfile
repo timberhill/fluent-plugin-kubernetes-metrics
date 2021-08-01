@@ -1,34 +1,62 @@
-FROM registry.access.redhat.com/ubi8/ruby-27
+FROM alpine:3.8
 
-ARG VERSION
+LABEL maintainer="Splunk Inc. <DataEdge@splunk.com>"
+LABEL Description="Splunk Connect for Kubernetes docker image" Vendor="Splunk Inc."
 
-LABEL name="Splunk Connect for Kubernetes Metrics container" \
-      maintainer="DataEdge@splunk.com" \
-      vendor="Splunk Inc." \
-      version=${VERSION} \
-      release=${VERSION} \
-      summary="Splunk Connect for Kubernetes Metrics container" \
-      description="Splunk Connect for Kubernetes Metrics container"
+# fluent-plugin-kubernetes-objects
+ENV KO_VERSION=1.1.2
+# fluent-plugin-k8s-metrics-agg
+ENV KMA_VERSION=1.1.2
+# fluent-plugin-kubernetes-metrics
+ENV KM_VERSION=1.1.2
+# fluent-plugin-splunk-hec
+ENV SH_VERSION=1.1.0
 
-ENV VERSION=${VERSION}
-ENV FLUENT_USER fluent
+ENV DUMB_INIT_VERSION=1.2.1
+ENV SU_EXEC_VERSION=0.2
 
-USER root
+ARG DEBIAN_FRONTEND=noninteractive
+# Do not split this into multiple RUN!
+# Docker creates a layer for every RUN-Statement
+# therefore an 'apk delete' has no effect
+RUN apk update \
+ && apk upgrade \
+ && apk add --no-cache \
+        ca-certificates \
+ && update-ca-certificates \
+ && apk add --no-cache \
+        ruby ruby-irb ruby-etc ruby-webrick ruby-json \
+        su-exec==${SU_EXEC_VERSION}-r0 \
+        dumb-init==${DUMB_INIT_VERSION}-r0 \
+ && apk add --no-cache --virtual .build-deps \
+        build-base \
+        ruby-dev ruby-bundler ruby-rake wget gnupg git \
+ && echo 'gem: --no-document' >> /etc/gemrc \
+ && gem install -N \
+         fluentd:1.4.0 \
+         fluent-plugin-record-modifier:2.0.1 \
+         fluent-plugin-splunk-hec:${SH_VERSION} \
+         oj:3.7.9 \
+         multi_json:1.13.1 \
+         bigdecimal:1.4.3 \
+         kubeclient:4.3.0 \
+ && git clone https://github.com/splunk/fluent-plugin-kubernetes-metrics.git \
+ && cd fluent-plugin-kubernetes-metrics \
+ && git checkout tags/${KM_VERSION} \
+ && gem build fluent-plugin-kubernetes-metrics \
+ && gem install fluent-plugin-kubernetes-metrics-${KM_VERSION}.gem \
+ && cd .. \
+ && rm -rf fluent-plugin-kubernetes-metrics \
+ && apk del .build-deps \
+ && rm -rf /var/cache/apk/* \
+ && rm -rf /tmp/* /var/tmp/* /usr/lib/ruby/gems/*/cache/*.gem
 
-COPY *.gem /tmp/
-COPY licenses /licenses
+ENV LD_PRELOAD="" \
+    FLUENTD_CONF="fluent.conf" \
+    FLUENTD_OPT="" \
+    DUMB_INIT_SETSID=0
 
-COPY Gemfile* ./
-RUN yum update -y \
-   && yum remove -y nodejs npm \
-   && gem install bundler \
-   && gem unpack /tmp/*.gem --target gem \
-   && bundle install 
+COPY entrypoint.sh /bin/entrypoint.sh
+ENTRYPOINT ["/bin/bash", "/bin/entrypoint.sh"]
 
-RUN groupadd -r $FLUENT_USER && \
-  useradd -r -g $FLUENT_USER $FLUENT_USER && \
-  mkdir -p /fluentd/log /fluentd/etc /fluentd/plugins && \
-  chown -R $FLUENT_USER /fluentd && chgrp -R $FLUENT_USER /fluentd
-
-USER $FLUENT_USER
-CMD bundle exec fluentd -c /fluentd/etc/fluent.conf
+CMD exec fluentd -c /fluentd/etc/${FLUENTD_CONF} -p /fluentd/plugins $FLUENTD_OPT
